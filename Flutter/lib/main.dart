@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:fl_chart/fl_chart.dart';
 
 void main() {
   runApp(const PicoApp());
@@ -29,11 +30,21 @@ class PicoHomePage extends StatefulWidget {
 
 class _PicoHomePageState extends State<PicoHomePage> {
   late http.Client client;
-
+  List<FlSpot> historyTempSpots = [];
+  int? minTs; 
+  int? maxTs;
+  int? baseEpochSeconds;
+  // Parallel arrays to enrich tooltip data
+  List<double> historyPressure = [];
+  List<double> historyHumidity = [];
+  List<int> historyTimestamps = [];
   @override
   void initState() {
     super.initState();
     client = widget.client ?? http.Client();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      fetchEndpoint("latest");
+    });
   }
 
   String latestText = "Press the button to get the latest value";
@@ -45,24 +56,21 @@ class _PicoHomePageState extends State<PicoHomePage> {
 
   final String picoIp = "192.168.1.45"; // Change this to your Pico W's IP address
 
-  Future<void> fetchEndpoint(String endpoint) async {
+ Future<void> fetchEndpoint(String endpoint) async {
+
     final url = Uri.parse("http://$picoIp/$endpoint");
 
     setState(() {
       isLoading = true;
       loadingEndpoint = endpoint;
-      if (endpoint == "latest") {
-        latestText = "Loading latest...";
-      } else if (endpoint == "history") {
-        historyText = "Loading history...";
-      } else if (endpoint == "clear") {
-        clearText = "Clearing history...";
-      }
+      if (endpoint == "latest") latestText = "Loading latest...";
+      if (endpoint == "history") historyText = "Loading history...";
+      if (endpoint == "clear_history") clearText = "Clearing history...";
     });
 
     try {
-      //final response = await http.get(url).timeout(const Duration(seconds: 5));
-      final response = await client.get(url).timeout(const Duration(seconds: 5));
+      // Extend timeout to 8s (was 5s)
+      final response = await client.get(url).timeout(const Duration(seconds: 8));
 
       if (response.statusCode == 200) {
         final raw = response.body.trim();
@@ -71,32 +79,45 @@ class _PicoHomePageState extends State<PicoHomePage> {
           if (endpoint == "latest") {
             latestText = formatLatest(raw);
           } else if (endpoint == "history") {
-            historyText = "History Results:\n\n$raw";
-          } else if (endpoint == "clear") {
+            historyText = ""; // suppress raw text output
+            _parseHistoryToSpots(raw);
+          } else if (endpoint == "clear_history") {
             clearText = "History cleared successfully.";
+            historyTempSpots = [];
+            minTs = null;
+            maxTs = null;
           }
         });
       } else {
         setState(() {
           final error = "HTTP ${response.statusCode}";
-
           if (endpoint == "latest") latestText = "Latest Error: $error";
           if (endpoint == "history") historyText = "History Error: $error";
-          if (endpoint == "clear") clearText = "Clear Error: $error";
+          if (endpoint == "clear_history") clearText = "Clear Error: $error";
         });
       }
     } on TimeoutException {
       setState(() {
-        if (endpoint == "latest") latestText = "Latest Error: Request timed out after 5s";
-        if (endpoint == "history") historyText = "History Error: Request timed out after 5s";
-        if (endpoint == "clear") clearText = "Clear Error: Request timed out after 5s";
+        if (endpoint == "latest") {
+          latestText = "Latest Error: Request timed out.";
+        } else if (endpoint == "history") {
+          historyText = "History Error: Request timed out.";
+        } else if (endpoint == "clear_history") {
+          clearText = "Clear Error: Request timed out.";
+        }
       });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Request timed out. Check device IP and network.")),
+      );
     } catch (e) {
       setState(() {
         if (endpoint == "latest") latestText = "Latest Failed: $e";
         if (endpoint == "history") historyText = "History Failed: $e";
-        if (endpoint == "clear") clearText = "Clear Failed: $e";
+        if (endpoint == "clear_history") clearText = "Clear Failed: $e";
       });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Request failed: $e")),
+      );
     } finally {
       setState(() {
         isLoading = false;
@@ -104,6 +125,7 @@ class _PicoHomePageState extends State<PicoHomePage> {
       });
     }
   }
+
 
   String formatLatest(String raw) {
     final parts = raw.split(",");
@@ -124,17 +146,73 @@ class _PicoHomePageState extends State<PicoHomePage> {
     final dt = DateTime.fromMillisecondsSinceEpoch(timestamp * 1000, isUtc: true).toLocal();
 
     return """
-Time: ${dt.toString().split('.').first}
-Pressure: ${pressure.toStringAsFixed(2)} Pa
-Temperature: ${temperature.toStringAsFixed(1)} °C
-Humidity: ${humidity.toStringAsFixed(1)} %
-""";
+      Time: ${dt.toString().split('.').first}
+      Pressure: ${pressure.toStringAsFixed(2)} Pa
+      Temperature: ${temperature.toStringAsFixed(1)} °C
+      Humidity: ${humidity.toStringAsFixed(1)} %
+      """;
   }
 
-    @override
+  
+   void _parseHistoryToSpots(String raw) {
+    final lines = raw.split(RegExp(r'\r?\n')).where((l) => l.trim().isNotEmpty);
+
+    final timestamps = <int>[];
+    final temps = <double>[];
+    final pressures = <double>[];
+    final humidities = <double>[];
+
+    for (final line in lines) {
+      final parts = line.split(',');
+      if (parts.length != 4) continue;
+
+      final ts = int.tryParse(parts[0]);
+      final pressure = double.tryParse(parts[1]);
+      final temp = double.tryParse(parts[2]);
+      final humidity = double.tryParse(parts[3]);
+
+      if (ts != null && temp != null && pressure != null && humidity != null) {
+        timestamps.add(ts);
+        temps.add(temp);
+        pressures.add(pressure);
+        humidities.add(humidity);
+      }
+    }
+
+    if (timestamps.isEmpty) {
+      historyTempSpots = [];
+      historyPressure = [];
+      historyHumidity = [];
+      historyTimestamps = [];
+      minTs = null;
+      maxTs = null;
+      baseEpochSeconds = null;
+      return;
+    }
+
+    final baseTs = timestamps.first;
+    baseEpochSeconds = baseTs;
+
+    historyTempSpots = [
+      for (int i = 0; i < timestamps.length; i++)
+        FlSpot(
+          (timestamps[i] - baseTs).toDouble(),
+          temps[i],
+        ),
+    ];
+    historyPressure = pressures;
+    historyHumidity = humidities;
+    historyTimestamps = timestamps;
+
+    minTs = 0;
+    maxTs = timestamps.last - baseTs;
+  }
+
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Pico W Demo App")),
+      appBar: AppBar(title: const Text("Pico Weather")),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: ListView(
@@ -168,15 +246,119 @@ Humidity: ${humidity.toStringAsFixed(1)} %
                   ),
               ],
             ),
-            Text(historyText),
-            const SizedBox(height: 20),
+            const SizedBox(height: 12),
+
+            // Temperature history chart
+            SizedBox(
+              height: 260,
+              child: historyTempSpots.isEmpty
+                  ? const Center(child: Text("No temperature data yet. Fetch history to see the graph."))
+                  : LineChart(
+                      LineChartData(
+                        minX: 0,
+                        maxX: (maxTs ?? 0).toDouble(),
+                        minY: (() {
+                          final ys = historyTempSpots.map((s) => s.y);
+                          final minY = ys.reduce((a, b) => a < b ? a : b);
+                          return (minY - 0.3);
+                        })(),
+                        maxY: (() {
+                          final ys = historyTempSpots.map((s) => s.y);
+                          final maxY = ys.reduce((a, b) => a > b ? a : b);
+                          return (maxY + 0.3);
+                        })(),
+                        gridData: FlGridData(
+                          show: true,
+                          drawVerticalLine: true,
+                          verticalInterval: ((maxTs ?? 0) > 0 ? ((maxTs! / 6).clamp(10, 300)).toDouble() : 60),
+                          horizontalInterval: 0.5,
+                          getDrawingHorizontalLine: (value) =>
+                              FlLine(color: Colors.grey.shade300, strokeWidth: 1),
+                          getDrawingVerticalLine: (value) =>
+                              FlLine(color: Colors.grey.shade300, strokeWidth: 1),
+                        ),
+                        titlesData: FlTitlesData(
+                          topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                          rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                          leftTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              interval: 0.5,
+                              reservedSize: 40,
+                              getTitlesWidget: (value, meta) =>
+                                  Text(value.toStringAsFixed(1), style: const TextStyle(fontSize: 11)),
+                            ),
+                          ),
+                          bottomTitles: AxisTitles(
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 34,
+                              interval: ((maxTs ?? 0) > 0 ? ((maxTs! / 6).toDouble()) : 60),
+                              getTitlesWidget: (value, meta) {
+                                final seconds = value.toInt();
+                                final m = (seconds ~/ 60).toString();
+                                final s = (seconds % 60).toString().padLeft(2, '0');
+                                return Padding(
+                                  padding: const EdgeInsets.only(top: 6.0),
+                                  child: Text("$m:$s", style: const TextStyle(fontSize: 11)),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                        borderData: FlBorderData(
+                          show: true,
+                          border: Border.all(color: Colors.grey.shade400),
+                        ),
+                        lineBarsData: [
+                          LineChartBarData(
+                            spots: historyTempSpots,
+                            isCurved: true,
+                            curveSmoothness: 0.2,
+                            color: Colors.orange,
+                            barWidth: 3,
+                            dotData: FlDotData(show: false),
+                            belowBarData: BarAreaData(
+                              show: true,
+                              color: Colors.orange.withOpacity(0.1),
+                            ),
+                          ),
+                        ],
+                        lineTouchData: LineTouchData(
+                          handleBuiltInTouches: true,
+                          touchTooltipData: LineTouchTooltipData(
+                            getTooltipItems: (items) => items.map((i) {
+                              final idx = i.spotIndex;
+                              final seconds = i.x.toInt();
+                              final epoch = (baseEpochSeconds ?? 0) + seconds;
+                              final dt = DateTime.fromMillisecondsSinceEpoch(epoch * 1000, isUtc: true).toLocal();
+                              final timeLabel = "${dt.hour}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}";
+                              final tempStr = i.y.toStringAsFixed(1);
+                              String pressureStr = "";
+                              String humidityStr = "";
+                              if (idx >= 0 && idx < historyPressure.length) {
+                                pressureStr = historyPressure[idx].toStringAsFixed(2);
+                              }
+                              if (idx >= 0 && idx < historyHumidity.length) {
+                                humidityStr = historyHumidity[idx].toStringAsFixed(1);
+                              }
+                              return LineTooltipItem(
+                                "$timeLabel\n$tempStr °C\n$pressureStr hPa\n$humidityStr %RH",
+                                const TextStyle(color: Colors.white),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ),
+                    ),
+            ),
 
             // Clear section header with per-request spinner
             Row(
               children: [
                 const Text("Clear History:", style: TextStyle(fontWeight: FontWeight.bold)),
                 const SizedBox(width: 8),
-                if (loadingEndpoint == "clear")
+                if (loadingEndpoint == "clear_history")
                   const SizedBox(
                     width: 18,
                     height: 18,
@@ -204,10 +386,10 @@ Humidity: ${humidity.toStringAsFixed(1)} %
             child: const Icon(Icons.list),
           ),
           FloatingActionButton(
-            heroTag: "clear",
-            onPressed: isLoading ? null : () => fetchEndpoint("clear"),
+            heroTag: "clear_history",
+            onPressed: isLoading ? null : () => fetchEndpoint("clear_history"),
             backgroundColor: Colors.redAccent,
-            tooltip: "Clear history",
+            tooltip: "Clear",
             child: const Icon(Icons.delete),
           ),
         ],

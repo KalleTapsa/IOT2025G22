@@ -30,6 +30,8 @@ class PicoHomePage extends StatefulWidget {
 
 class _PicoHomePageState extends State<PicoHomePage> {
   late http.Client client;
+  Timer? latestTimer;
+  Timer? historyTimer;
   List<FlSpot> historyTempSpots = [];
   int? minTs; 
   int? maxTs;
@@ -44,7 +46,26 @@ class _PicoHomePageState extends State<PicoHomePage> {
     client = widget.client ?? http.Client();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       fetchEndpoint("latest");
+      fetchEndpoint("history");
+      
+      // Fetch latest every 10 seconds
+      latestTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+        fetchEndpoint("latest");
+      });
+      
+      // Fetch history every 60 seconds
+      historyTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+        fetchEndpoint("history");
+      });
     });
+  }
+
+  @override
+  void dispose() {
+    latestTimer?.cancel();
+    historyTimer?.cancel();
+    client.close();
+    super.dispose();
   }
 
   String latestText = "Press the button to get the latest value";
@@ -54,7 +75,7 @@ class _PicoHomePageState extends State<PicoHomePage> {
   bool isLoading = false;
   String? loadingEndpoint;
 
-  final String picoIp = "192.168.1.45"; // Change this to your Pico W's IP address
+  final String picoIp = "192.168.1.45"; // Tähän Picon IP-osoite
 
  Future<void> fetchEndpoint(String endpoint) async {
 
@@ -69,7 +90,42 @@ class _PicoHomePageState extends State<PicoHomePage> {
     });
 
     try {
-      // Extend timeout to 8s (was 5s)
+      // Mock data - comment out for real fetch
+      await Future.delayed(const Duration(milliseconds: 500));
+      
+      if (endpoint == "latest") {
+        final mockTimestamp = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final mockResponse = "$mockTimestamp,101325.5,${20 + (DateTime.now().second % 5)}.3,${45 + (DateTime.now().second % 10)}.2";
+        setState(() {
+          latestText = formatLatest(mockResponse);
+        });
+        return;
+      } else if (endpoint == "history") {
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final mockHistory = List.generate(20, (i) {
+          final ts = now - (20 - i) * 30;
+          final temp = 20 + (i % 5) * 0.5;
+          final pressure = 101325 + (i % 3) * 50;
+          final humidity = 45 + (i % 8) * 2;
+          return "$ts,$pressure,$temp,$humidity";
+        }).join("\n");
+        setState(() {
+          historyText = "";
+          _parseHistoryToSpots(mockHistory);
+        });
+        return;
+      } else if (endpoint == "clear_history") {
+        setState(() {
+          clearText = "History cleared successfully.";
+          historyTempSpots = [];
+          minTs = null;
+          maxTs = null;
+        });
+        return;
+      }
+      
+      // Real fetch - uncomment to use actual device
+      /*
       final response = await client.get(url).timeout(const Duration(seconds: 8));
 
       if (response.statusCode == 200) {
@@ -79,7 +135,7 @@ class _PicoHomePageState extends State<PicoHomePage> {
           if (endpoint == "latest") {
             latestText = formatLatest(raw);
           } else if (endpoint == "history") {
-            historyText = ""; // suppress raw text output
+            historyText = "";
             _parseHistoryToSpots(raw);
           } else if (endpoint == "clear_history") {
             clearText = "History cleared successfully.";
@@ -96,6 +152,7 @@ class _PicoHomePageState extends State<PicoHomePage> {
           if (endpoint == "clear_history") clearText = "Clear Error: $error";
         });
       }
+      */
     } on TimeoutException {
       setState(() {
         if (endpoint == "latest") {
@@ -230,6 +287,7 @@ class _PicoHomePageState extends State<PicoHomePage> {
                   ),
               ],
             ),
+            Image.asset('images/cold.png', width: 150, height: 150),
             Text(latestText),
             const SizedBox(height: 20),
 

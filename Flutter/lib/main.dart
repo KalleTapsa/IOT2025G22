@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:fl_chart/fl_chart.dart';
+import 'package:intl/intl.dart';
 
 void main() {
   runApp(const PicoApp());
@@ -36,19 +37,24 @@ class _PicoHomePageState extends State<PicoHomePage> {
   int? minTs; 
   int? maxTs;
   int? baseEpochSeconds;
-  // Parallel arrays to enrich tooltip data
   List<double> historyPressure = [];
   List<double> historyHumidity = [];
   List<int> historyTimestamps = [];
+  
+  String currentImage = 'images/warm.png';
+  
   @override
   void initState() {
     super.initState();
     client = widget.client ?? http.Client();
+    ipController.text = picoIp;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!isIpSet) return; // Don't fetch until user sets IP
+      
       fetchEndpoint("latest");
       fetchEndpoint("history");
       
-      // Fetch latest every 10 seconds
+      // Fetch latest every 15 seconds
       latestTimer = Timer.periodic(const Duration(seconds: 15), (_) {
         fetchEndpoint("latest");
       });
@@ -64,18 +70,21 @@ class _PicoHomePageState extends State<PicoHomePage> {
   void dispose() {
     latestTimer?.cancel();
     historyTimer?.cancel();
+    ipController.dispose();
     client.close();
     super.dispose();
   }
 
-  String latestText = "Press the button to get the latest value";
+  String latestText = "";
   String historyText = "History will appear here";
   String clearText = "Clear status will appear here";
 
   bool isLoading = false;
   String? loadingEndpoint;
+  bool isIpSet = false;
 
-  final String picoIp = "192.168.1.45"; // Tähän Picon IP-osoite
+  String picoIp = "192.168.1.45"; // Picon IP-osoite
+  final TextEditingController ipController = TextEditingController();
 
  Future<void> fetchEndpoint(String endpoint) async {
 
@@ -84,48 +93,15 @@ class _PicoHomePageState extends State<PicoHomePage> {
     setState(() {
       isLoading = true;
       loadingEndpoint = endpoint;
-      if (endpoint == "latest") latestText = "Loading latest...";
+      if (endpoint == "latest") {
+        latestText = "Loading latest...";
+        currentImage = '';
+      }
       if (endpoint == "history") historyText = "Loading history...";
       if (endpoint == "clear_history") clearText = "Clearing history...";
     });
 
     try {
-      // Mock data - comment out for real fetch
-      await Future.delayed(const Duration(milliseconds: 500));
-      
-      if (endpoint == "latest") {
-        final mockTimestamp = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-        final mockResponse = "$mockTimestamp,101325.5,${20 + (DateTime.now().second % 5)}.3,${45 + (DateTime.now().second % 10)}.2";
-        setState(() {
-          latestText = formatLatest(mockResponse);
-        });
-        return;
-      } else if (endpoint == "history") {
-        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-        final mockHistory = List.generate(20, (i) {
-          final ts = now - (20 - i) * 30;
-          final temp = 20 + (i % 5) * 0.5;
-          final pressure = 101325 + (i % 3) * 50;
-          final humidity = 45 + (i % 8) * 2;
-          return "$ts,$pressure,$temp,$humidity";
-        }).join("\n");
-        setState(() {
-          historyText = "";
-          _parseHistoryToSpots(mockHistory);
-        });
-        return;
-      } else if (endpoint == "clear_history") {
-        setState(() {
-          clearText = "History cleared successfully.";
-          historyTempSpots = [];
-          minTs = null;
-          maxTs = null;
-        });
-        return;
-      }
-      
-      // Real fetch - uncomment to use actual device
-      /*
       final response = await client.get(url).timeout(const Duration(seconds: 8));
 
       if (response.statusCode == 200) {
@@ -134,6 +110,14 @@ class _PicoHomePageState extends State<PicoHomePage> {
         setState(() {
           if (endpoint == "latest") {
             latestText = formatLatest(raw);
+            final parts = raw.split(",");
+            if (parts.length == 4) {
+              final temp = double.tryParse(parts[2]);
+              final humidity = double.tryParse(parts[3]);
+              if (temp != null && humidity != null) {
+                currentImage = _getImageForConditions(temp, humidity);
+              }
+            }
           } else if (endpoint == "history") {
             historyText = "";
             _parseHistoryToSpots(raw);
@@ -147,16 +131,21 @@ class _PicoHomePageState extends State<PicoHomePage> {
       } else {
         setState(() {
           final error = "HTTP ${response.statusCode}";
-          if (endpoint == "latest") latestText = "Latest Error: $error";
+          if (endpoint == "latest") {
+            latestText = "Latest Error: $error";
+            // Restore image instead of showing loader
+            if (currentImage.isEmpty) currentImage = 'images/cold.png';
+          }
           if (endpoint == "history") historyText = "History Error: $error";
           if (endpoint == "clear_history") clearText = "Clear Error: $error";
         });
       }
-      */
     } on TimeoutException {
       setState(() {
         if (endpoint == "latest") {
           latestText = "Latest Error: Request timed out.";
+          // Restore image instead of showing loader
+          if (currentImage.isEmpty) currentImage = 'images/warm.png';
         } else if (endpoint == "history") {
           historyText = "History Error: Request timed out.";
         } else if (endpoint == "clear_history") {
@@ -168,7 +157,11 @@ class _PicoHomePageState extends State<PicoHomePage> {
       );
     } catch (e) {
       setState(() {
-        if (endpoint == "latest") latestText = "Latest Failed: $e";
+        if (endpoint == "latest") {
+          latestText = "Latest Failed: $e";
+          // Restore image instead of showing loader
+          if (currentImage.isEmpty) currentImage = 'images/warm.png';
+        }
         if (endpoint == "history") historyText = "History Failed: $e";
         if (endpoint == "clear_history") clearText = "Clear Failed: $e";
       });
@@ -202,12 +195,43 @@ class _PicoHomePageState extends State<PicoHomePage> {
 
     final dt = DateTime.fromMillisecondsSinceEpoch(timestamp * 1000, isUtc: true).toLocal();
 
+    final formatted = DateFormat('HH:mm:ss dd:MM:yyyy').format(dt);
+
     return """
-      Time: ${dt.toString().split('.').first}
-      Pressure: ${pressure.toStringAsFixed(2)} Pa
+      Time: $formatted
       Temperature: ${temperature.toStringAsFixed(1)} °C
       Humidity: ${humidity.toStringAsFixed(1)} %
+      Pressure: ${(pressure / 100).toStringAsFixed(2)} hPa
       """;
+  }
+
+  String _getImageForConditions(double temperature, double humidity) {
+    // Determine temperature
+    final bool isTempCold = temperature < 20;
+    final bool isTempWarm = temperature >= 20 && temperature <= 25;
+    final bool isTempHot = temperature > 25;
+
+    // Determine humidity
+    final bool isHumidityDry = humidity < 45;
+    final bool isHumidityNormal = humidity >= 45 && humidity <= 55;
+    final bool isHumidityWet = humidity > 55;
+
+    // Both abnormal
+    if (isTempCold && isHumidityDry) return 'images/coldDry.png';
+    if (isTempCold && isHumidityWet) return 'images/coldWet.png';
+    if (isTempHot && isHumidityDry) return 'images/hotDry.png';
+    if (isTempHot && isHumidityWet) return 'images/hotWet.png';
+
+    // Only temperature is abnormal
+    if (isTempCold && isHumidityNormal) return 'images/cold.png';
+    if (isTempHot && isHumidityNormal) return 'images/hot.png';
+
+    // Only humidity is abnormal
+    if (isTempWarm && isHumidityDry) return 'images/warmDry.png';
+    if (isTempWarm && isHumidityWet) return 'images/warmWet.png';
+
+    // Both are normal
+    return 'images/warm.png';
   }
 
   
@@ -274,24 +298,111 @@ class _PicoHomePageState extends State<PicoHomePage> {
         padding: const EdgeInsets.all(16.0),
         child: ListView(
           children: [
-            // Latest section header with per-request spinner
+            const SizedBox(height: 10),
+            // IP Address input
             Row(
               children: [
-                const Text("Latest:", style: TextStyle(fontWeight: FontWeight.bold)),
-                const SizedBox(width: 8),
-                if (loadingEndpoint == "latest")
-                  const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                Expanded(
+                  child: TextField(
+                    controller: ipController,
+                    decoration: const InputDecoration(
+                      labelText: 'Pico IP Address',
+                      border: OutlineInputBorder(),
+                      hintText: '192.168.1.45',
+                    ),
                   ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: () {
+                    // Hide keyboard
+                    FocusScope.of(context).unfocus();
+                    
+                    setState(() {
+                      picoIp = ipController.text;
+                      isIpSet = true;
+                    });
+                    
+                    // Start fetching and timers on first IP set
+                    if (latestTimer == null && historyTimer == null) {
+                      fetchEndpoint("latest");
+                      fetchEndpoint("history");
+                      
+                      latestTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+                        fetchEndpoint("latest");
+                      });
+                      
+                      historyTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+                        fetchEndpoint("history");
+                      });
+                    }
+                    
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('IP updated to: $picoIp')),
+                    );
+                  },
+                  child: const Text('Set'),
+                ),
               ],
             ),
-            Image.asset('images/cold.png', width: 150, height: 150),
-            Text(latestText),
             const SizedBox(height: 20),
 
-            // History section header with per-request spinner
+            // Latest section
+            Padding(
+              padding: const EdgeInsets.only(bottom: 16.0),
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Image or loader
+                    SizedBox(
+                      width: 250,
+                      height: 250,
+                      child: 
+                        !isIpSet ? 
+                          const Text(
+                              "Set the IP address first",
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            )
+                          :
+                        currentImage.isNotEmpty
+                          ? Image.asset(
+                              currentImage,
+                              width: 250,
+                              height: 250,
+                              fit: BoxFit.contain,
+                            )
+                          : 
+                          const Center(
+                              child: CircularProgressIndicator(),
+                            ),
+                    ),
+
+                    const SizedBox(height: 10),
+
+                    // Text aligned to image width
+                    SizedBox(
+                      width: 300,
+                      child: Text(
+                        latestText,
+                        textAlign: TextAlign.left,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+
+            // History section
             Row(
               children: [
                 const Text("History:", style: TextStyle(fontWeight: FontWeight.bold)),
@@ -411,7 +522,7 @@ class _PicoHomePageState extends State<PicoHomePage> {
                     ),
             ),
 
-            // Clear section header with per-request spinner
+/*             // Clear section
             Row(
               children: [
                 const Text("Clear History:", style: TextStyle(fontWeight: FontWeight.bold)),
@@ -424,7 +535,8 @@ class _PicoHomePageState extends State<PicoHomePage> {
                   ),
               ],
             ),
-            Text(clearText),
+            Text(clearText), */
+            const SizedBox(height: 100),
           ],
         ),
       ),
@@ -448,7 +560,7 @@ class _PicoHomePageState extends State<PicoHomePage> {
             onPressed: isLoading ? null : () => fetchEndpoint("clear_history"),
             backgroundColor: Colors.redAccent,
             tooltip: "Clear",
-            child: const Icon(Icons.delete),
+            child: loadingEndpoint == "clear_history" ? CircularProgressIndicator(strokeWidth: 2) : const Icon(Icons.delete),
           ),
         ],
       ),

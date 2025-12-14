@@ -521,21 +521,6 @@ class _PicoHomePageState extends State<PicoHomePage> {
                       ),
                     ),
             ),
-
-/*             // Clear section
-            Row(
-              children: [
-                const Text("Clear History:", style: TextStyle(fontWeight: FontWeight.bold)),
-                const SizedBox(width: 8),
-                if (loadingEndpoint == "clear_history")
-                  const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-              ],
-            ),
-            Text(clearText), */
             const SizedBox(height: 100),
           ],
         ),

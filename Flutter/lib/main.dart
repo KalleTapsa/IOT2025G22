@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
@@ -54,8 +55,8 @@ class _PicoHomePageState extends State<PicoHomePage> {
       fetchEndpoint("latest");
       fetchEndpoint("history");
       
-      // Fetch latest every 15 seconds
-      latestTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      // Fetch latest every 30 seconds
+      latestTimer = Timer.periodic(const Duration(seconds: 30), (_) {
         fetchEndpoint("latest");
       });
       
@@ -86,8 +87,7 @@ class _PicoHomePageState extends State<PicoHomePage> {
   String picoIp = "192.168.1.45"; // Picon IP-osoite
   final TextEditingController ipController = TextEditingController();
 
- Future<void> fetchEndpoint(String endpoint) async {
-
+  Future<void> fetchEndpoint(String endpoint) async {
     final url = Uri.parse("http://$picoIp/$endpoint");
 
     setState(() {
@@ -233,9 +233,25 @@ class _PicoHomePageState extends State<PicoHomePage> {
     // Both are normal
     return 'images/warm.png';
   }
+  // Filter data points to show only today's values
+  List<FlSpot> _getTodaySpots() {
+    if (historyTempSpots.isEmpty) return [];
+    
+    final now = DateTime.now();
+    final startOfToday = DateTime(now.year, now.month, now.day);
+    
+    return historyTempSpots.where((spot) {
+      final epochSeconds = (baseEpochSeconds ?? 0) + spot.x.toInt();
+      final spotTime = DateTime.fromMillisecondsSinceEpoch(
+        epochSeconds * 1000,
+        isUtc: true,
+      ).toLocal();
+      
+      return spotTime.isAfter(startOfToday) || spotTime.isAtSameMomentAs(startOfToday);
+    }).toList();
+  }
 
-  
-   void _parseHistoryToSpots(String raw) {
+  void _parseHistoryToSpots(String raw) {
     final lines = raw.split(RegExp(r'\r?\n')).where((l) => l.trim().isNotEmpty);
 
     final timestamps = <int>[];
@@ -293,7 +309,17 @@ class _PicoHomePageState extends State<PicoHomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Pico Weather")),
+      backgroundColor: Color.fromARGB(248, 162, 229, 255),
+      appBar: AppBar(
+        backgroundColor: Color.fromARGB(248, 0, 147, 206),
+        title: Text("Pico Weather"),
+        titleTextStyle: TextStyle(
+          color: const Color.fromARGB(255, 39, 39, 39),
+          fontSize: 22,
+          fontWeight: FontWeight.bold,
+        ),
+        centerTitle: true,
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: ListView(
@@ -363,7 +389,7 @@ class _PicoHomePageState extends State<PicoHomePage> {
                           const Text(
                               "Set the IP address first",
                               textAlign: TextAlign.center,
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.w500,
                               ),
@@ -405,7 +431,7 @@ class _PicoHomePageState extends State<PicoHomePage> {
             // History section
             Row(
               children: [
-                const Text("History:", style: TextStyle(fontWeight: FontWeight.bold)),
+                const Text("Weather today:", style: TextStyle(fontWeight: FontWeight.bold)),
                 const SizedBox(width: 8),
                 if (loadingEndpoint == "history")
                   const SizedBox(
@@ -416,31 +442,37 @@ class _PicoHomePageState extends State<PicoHomePage> {
               ],
             ),
             const SizedBox(height: 12),
-
             // Temperature history chart
             SizedBox(
               height: 260,
-              child: historyTempSpots.isEmpty
-                  ? const Center(child: Text("No temperature data yet. Fetch history to see the graph."))
-                  : LineChart(
+              child: () {
+                final todaySpots = _getTodaySpots();
+                if (todaySpots.isEmpty) {
+                  return const Center(child: Text("No temperature data for today. Fetch history to see the graph."));
+                }
+                
+                // Calculate start of today
+                final now = DateTime.now();
+                final startOfToday = DateTime(now.year, now.month, now.day);
+                final startOfTodayEpoch = startOfToday.millisecondsSinceEpoch ~/ 1000;
+                final minX = (startOfTodayEpoch - (baseEpochSeconds ?? 0)).toDouble();
+                
+                // Calculate end of today
+                final endOfToday = startOfToday.add(const Duration(days: 1));
+                final endOfTodayEpoch = endOfToday.millisecondsSinceEpoch ~/ 1000;
+                final maxX = (endOfTodayEpoch - (baseEpochSeconds ?? 0)).toDouble();
+                
+                return LineChart(
                       LineChartData(
-                        minX: 0,
-                        maxX: (maxTs ?? 0).toDouble(),
-                        minY: (() {
-                          final ys = historyTempSpots.map((s) => s.y);
-                          final minY = ys.reduce((a, b) => a < b ? a : b);
-                          return (minY - 0.3);
-                        })(),
-                        maxY: (() {
-                          final ys = historyTempSpots.map((s) => s.y);
-                          final maxY = ys.reduce((a, b) => a > b ? a : b);
-                          return (maxY + 0.3);
-                        })(),
+                        minX: minX,
+                        maxX: maxX,
+                        minY: 15.0,
+                        maxY: 30.0,
                         gridData: FlGridData(
                           show: true,
                           drawVerticalLine: true,
                           verticalInterval: ((maxTs ?? 0) > 0 ? ((maxTs! / 6).clamp(10, 300)).toDouble() : 60),
-                          horizontalInterval: 0.5,
+                          horizontalInterval: 5.0,
                           getDrawingHorizontalLine: (value) =>
                               FlLine(color: Colors.grey.shade300, strokeWidth: 1),
                           getDrawingVerticalLine: (value) =>
@@ -452,24 +484,36 @@ class _PicoHomePageState extends State<PicoHomePage> {
                           leftTitles: AxisTitles(
                             sideTitles: SideTitles(
                               showTitles: true,
-                              interval: 0.5,
-                              reservedSize: 40,
+                              interval: 5,
+                              reservedSize: 30,
                               getTitlesWidget: (value, meta) =>
-                                  Text(value.toStringAsFixed(1), style: const TextStyle(fontSize: 11)),
+                                  Text('${value.toStringAsFixed(0)}°C', style: const TextStyle(fontSize: 11)),
                             ),
                           ),
                           bottomTitles: AxisTitles(
                             sideTitles: SideTitles(
                               showTitles: true,
-                              reservedSize: 34,
-                              interval: ((maxTs ?? 0) > 0 ? ((maxTs! / 6).toDouble()) : 60),
+                              reservedSize: 32,
+                              interval: 3600,
                               getTitlesWidget: (value, meta) {
-                                final seconds = value.toInt();
-                                final m = (seconds ~/ 60).toString();
-                                final s = (seconds % 60).toString().padLeft(2, '0');
+                                final epochSeconds = (baseEpochSeconds ?? 0) + value.toInt();
+                                final dt = DateTime.fromMillisecondsSinceEpoch(
+                                  epochSeconds * 1000,
+                                  isUtc: true,
+                                ).toLocal();
+                                
+
+                                final allowedHours = [3, 6, 9, 12, 15, 18, 21];
+                                if (!allowedHours.contains(dt.hour)) {
+                                  return const SizedBox.shrink();
+                                }
+                                
                                 return Padding(
                                   padding: const EdgeInsets.only(top: 6.0),
-                                  child: Text("$m:$s", style: const TextStyle(fontSize: 11)),
+                                  child: Text(
+                                    '${dt.hour.toString().padLeft(2, '0')}:00',
+                                    style: const TextStyle(fontSize: 11),
+                                  ),
                                 );
                               },
                             ),
@@ -481,16 +525,12 @@ class _PicoHomePageState extends State<PicoHomePage> {
                         ),
                         lineBarsData: [
                           LineChartBarData(
-                            spots: historyTempSpots,
+                            spots: todaySpots,
                             isCurved: true,
                             curveSmoothness: 0.2,
                             color: Colors.orange,
                             barWidth: 3,
                             dotData: FlDotData(show: false),
-                            belowBarData: BarAreaData(
-                              show: true,
-                              color: Colors.orange.withOpacity(0.1),
-                            ),
                           ),
                         ],
                         lineTouchData: LineTouchData(
@@ -519,7 +559,8 @@ class _PicoHomePageState extends State<PicoHomePage> {
                           ),
                         ),
                       ),
-                    ),
+                    );
+              }(),
             ),
             const SizedBox(height: 100),
           ],
@@ -543,7 +584,7 @@ class _PicoHomePageState extends State<PicoHomePage> {
           FloatingActionButton(
             heroTag: "clear_history",
             onPressed: isLoading ? null : () => fetchEndpoint("clear_history"),
-            backgroundColor: Colors.redAccent,
+            backgroundColor: const Color.fromARGB(255, 247, 133, 133),
             tooltip: "Clear",
             child: loadingEndpoint == "clear_history" ? CircularProgressIndicator(strokeWidth: 2) : const Icon(Icons.delete),
           ),
